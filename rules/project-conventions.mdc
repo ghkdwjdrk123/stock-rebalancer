@@ -1,0 +1,38 @@
+---
+title: 프로젝트 규약
+description: 코드 스타일, 브랜치 전략, 커밋 규칙, 보안 원칙을 정리한 문서
+tags: [conventions, style, git, security, testing]
+scope: repository
+version: 1
+---
+
+## 프로젝트 규약
+
+### 레포 구조
+- `src/` 애플리케이션 코드, `rules/` 협업/어시스턴트 규칙
+- `targets.example.json` 샘플 설정, 실제 키/토큰은 환경변수 사용
+
+### 코드 스타일
+- Python: Black/PEP8 준수, 타입힌트 적극 사용
+- 함수/변수: 의미 있는 전체 단어 사용, 축약 지양
+
+### 커밋 규칙 (Conventional Commits)
+- feat, fix, refactor, docs, test, chore, perf, ci
+- 예: `feat(rebalance): 비중 계산 시 세금 고려`
+
+### 브랜치 전략
+- main: 안정 릴리스, dev: 통합, `feat/*`, `fix/*` 단위 작업
+- PR은 작은 단위, 설명/테스트 포함, 리뷰 1인 이상
+
+### 테스트
+- 단위 테스트 우선, 핵심 서비스/가드/라운딩 로직 커버
+- 외부 API는 모킹, 네트워크 의존 제거
+
+### 보안/비밀 관리
+- `.env` 사용, 리포에 비밀 커밋 금지
+- 로그에 PII/토큰 출력 금지
+
+### 배포/릴리스
+- 태그 규칙: `vMAJOR.MINOR.PATCH`
+- 변경 로그에 주요 기능/버그/마이그레이션 명시
+

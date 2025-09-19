@@ -1,0 +1,215 @@
+---
+description: 주식 리밸런싱과 관련된 개발을 할 때 아래의 규칙을 참조.
+globs:
+alwaysApply: false
+---
+
+### 주식 리밸런싱 README
+
+#### 개요
+- KIS OpenAPI를 통해 현재 계좌의 보유 종목을 목표 비중에 맞춰 자동 리밸런싱하는 CLI 제공
+- 시장가 주문으로 매수/매도 자동 실행
+- DRY_RUN 모드로 시뮬레이션 가능
+
+---
+
+### 타깃 설정 (targets.json)
+```json
+{
+  "band_pct": 1.0,
+  "order_style": "market",
+  "tickers": {
+    "379810": 0.6,
+    "005930": 0.3,
+    "000660": 0.1
+  }
+}
+```
+
+- **band_pct**: 목표 비중 대비 허용 밴드(%)
+- **order_style**: 주문 방식 (현재 "market" 고정)
+- **tickers**: 종목코드별 목표 비중 (합계 1.0)
+
+---
+
+### 실행 명령어
+
+#### 시뮬레이션 (DRY_RUN)
+```powershell
+# 모의 환경
+python -m src.cli.main rebalance --config targets.example.json --env dev --dry-run
+# 실전 환경
+python -m src.cli.main rebalance --config targets.example.json --env prod --dry-run
+```
+
+#### 실제 주문 실행
+```powershell
+# 모의 환경 (장시간 외 강제 실행)
+python -m src.cli.main rebalance --config targets.example.json --env dev --no-dry-run --ignore-guards
+# 실전 환경 (장시간 내만 가능)
+python -m src.cli.main rebalance --config targets.example.json --env prod --no-dry-run
+```
+
+#### 원문 JSON 출력
+```powershell
+python -m src.cli.main rebalance --config targets.example.json --env dev --dry-run --raw
+```
+
+---
+
+### 리밸런싱 로직 (1~5단계)
+
+#### 1~2단계: 계좌조회 API로 보유 종목 + 주문가능현금 파악
+- **API**: `inquire_balance` (KIS_TR_BALANCE_DEV/PROD)
+- **목적**: 
+  - `output1`: 현재 보유 종목과 수량 파악
+  - `output2.dnca_tot_amt`: 주문가능현금 파악
+- **출력**: 
+  - `{종목코드: 수량}` 딕셔너리
+  - 주문가능현금 (float)
+- **에러 처리**: 조회 실패 시 프로세스 중단
+- **참고**: `dnca_tot_amt`는 전체 주문 가능 자금을 대략적으로 반영
+
+#### 3단계: 가격 조회
+- **API**: `inquire_price` (KIS_TR_PRICE_DEV/PROD)
+- **목적**: 대상 종목별 현재가 조회
+- **출력**: `{종목코드: 가격}` 딕셔너리
+- **에러 처리**: 개별 종목 실패 시 0.0으로 처리
+
+#### 4단계: 리밸런싱 계획 수립
+- **전체 자산가치**: `현금 + Σ(가격 × 수량)`
+- **현재 비중**: 각 종목의 현재 비중 계산
+- **밴드 체크**: 목표 비중 대비 허용 밴드 초과 시 주문 대상
+- **매도 우선**: 매도 → 매수 순서로 실행 (현금 확보 후 매수)
+
+#### 5단계: 실제 매매/매도 API 실행
+- **API**: `order_cash` (KIS_TR_ORDER_BUY/SELL_DEV/PROD)
+- **시장가 주문**: `limit=None`으로 시장가 주문
+- **멱등성**: 동일 주문 중복 방지 (side:code:qty:limit 키)
+- **주문번호 추출**: 응답에서 주문번호 수집
+- **레이트리밋**: 초당 5회, 분당 200회 제한
+
+---
+
+### 출력 형식
+
+#### 단계별 로깅 (요약 출력)
+```
+[2025-09-15 23:20:10] 1~2단계: 계좌조회 API로 보유 종목 및 주문가능현금 조회 중...
+[2025-09-15 23:20:10] 보유 종목: 2개 - {'379810': 1, '005930': 0}
+[2025-09-15 23:20:10] 주문가능현금: 1,000,000원 (dnca_tot_amt 기준)
+[2025-09-15 23:20:10] 3단계: 대상 종목 가격 조회 중...
+[2025-09-15 23:20:10] 가격 조회 완료: 2개 종목
+[2025-09-15 23:20:10] 4단계: 리밸런싱 계획 수립 중...
+[2025-09-15 23:20:10] 목표 비중: {'379810': 0.6, '005930': 0.4}
+[2025-09-15 23:20:10] 허용 밴드: 1.0%
+[2025-09-15 23:20:10] Planned Orders (2):
+SELL 379810 x1 (시장가)
+BUY 005930 x2 (시장가)
+[2025-09-15 23:20:10] 5단계: 주문 실행 중...
+[2025-09-15 23:20:10] 실행할 주문: 2건
+[2025-09-15 23:20:10] 주문 실행 완료: 2건
+```
+
+#### 원문 JSON 출력 (--raw)
+```json
+=== 잔고/포지션 원본 ===
+{
+  "positions": {"379810": 1, "005930": 0},
+  "cash": 1000000.0
+}
+=== 가격 원본 ===
+{
+  "379810": 22335.0,
+  "005930": 70000.0
+}
+=== 계획 원본 ===
+[
+  {"code": "379810", "side": "SELL", "qty": 1, "limit": null},
+  {"code": "005930", "side": "BUY", "qty": 2, "limit": null}
+]
+=== 주문 결과 원본 ===
+[
+  {"order_id": "12345", "output": {...}},
+  {"order_id": "12346", "output": {...}}
+]
+```
+
+---
+
+### 주요 구현 사항
+
+#### 환경별 분리
+- **도메인**: `KIS_BASE_DEV/PROD`로 모의/실전 분리
+- **TR_ID**: `KIS_TR_*_DEV/PROD`로 환경별 거래ID 분리
+- **계좌**: `KIS_ACCOUNT_8_DEV/PROD`로 계좌 분리
+
+#### 안전장치
+- **레이트리밋**: `AsyncRateLimiter`로 API 호출 제한
+- **백오프**: 429/5xx 에러 시 지수 백오프 재시도
+- **가드**: 영업일/장중 여부 확인 (dev: python-holidays, prod: MARKETSTATUS)
+- **멱등성**: 중복 주문 방지
+
+#### 에러 처리
+- **가격 조회 실패**: 0.0으로 처리하여 계획에서 제외
+- **주문 실패**: 로그 기록, 자동 재시도 금지 (중복 위험)
+- **설정 누락**: 필수 환경변수 검증 후 에러 메시지
+
+---
+
+### 문제 해결
+
+#### 현금 파싱 문제
+- **증상**: balance에서는 예수금 표시, rebalance에서는 현금 0원
+- **원인**: `ord_psbl_cash`만 찾고 `dnca_tot_amt` 미사용
+- **해결**: 주문가능현금 우선, 없으면 총 예수금 사용
+
+#### 500 Internal Server Error
+- **가격 조회**: 일시적 서버 오류, 백오프 후 재시도
+- **종목코드**: 모의투자 미지원 종목일 수 있음
+- **해결**: 주요 종목(005930, 000660 등) 사용
+
+#### 계획 빈 배열
+- **원인**: 현금 0원 + 보유 종목 없음 = 전체 자산가치 0원
+- **해결**: 모의투자 계좌에 현금 입금 또는 DRY_RUN 사용
+
+#### 장시간 외 실행
+- **제한**: 3시 30분 이후 실제 주문 불가
+- **해결**: `--ignore-guards`로 강제 실행 (API 제한에 걸릴 수 있음)
+- **권장**: 내일 장시간 내 테스트
+
+---
+
+### 개발 구조
+
+#### 파일 구조
+```
+src/
+├── cli/
+│   ├── main.py              # CLI 진입점
+│   └── commands/
+│       └── rebalance.py     # 리밸런싱 명령 구현
+├── services/
+│   ├── brokers/
+│   │   ├── base.py          # Broker 인터페이스
+│   │   └── kis.py           # KIS Broker 구현
+│   ├── portfolio.py         # 잔고/가격 수집
+│   ├── rebalance_executor.py # 계획 수립/주문 실행
+│   └── guards.py            # 영업일/장중 가드
+├── core/
+│   ├── rebalance.py         # 리밸런싱 알고리즘
+│   ├── models.py            # OrderPlan 모델
+│   └── rounding.py          # 수량 반올림/제한
+└── adapters/kis/
+    ├── client.py            # HTTP 클라이언트
+    └── domestic.py          # 국내주식 API
+```
+
+#### 주요 클래스/함수
+- **KISBroker**: KIS API를 Broker 인터페이스로 래핑
+- **plan_rebalance**: 리밸런싱 계획 수립
+- **execute_plan**: 주문 실행 및 결과 수집
+- **get_positions_and_cash**: 잔고에서 포지션/현금 파싱
+- **is_trading_day/is_market_open_now**: 영업일/장중 가드
+
+---

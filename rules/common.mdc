@@ -1,0 +1,304 @@
+---
+description: API 송수신, 실행 명령어 등 기본 공통 기능 개발 및 개발 중 공통 기능을 사용해야 할 때 아래의 규칙을 참조.
+globs:
+alwaysApply: false
+---
+
+#### 개요
+- KIS OpenAPI를 통해 현재 계좌의 보유 종목과 예수금을 조회 및 계좌 내 주식들을 리밸런싱하는 CLI 제공
+- 환경별 실행: `--env dev` (모의) / `--env prod` (실전)
+- 원문(JSON) 출력: `--raw` 옵션
+
+---
+
+### 개발 원칙 및 코딩 규칙
+
+#### 1. 설정 관리 원칙
+- **중앙 집중**: 모든 설정은 `src/config.py`의 `Settings` 클래스에서 관리
+- **환경변수 우선**: `.env` 파일의 값이 코드의 기본값보다 우선
+- **하드코딩 금지**: 코드에 직접 값을 작성하지 않고 환경변수 또는 Settings 사용
+- **타입 안전성**: Pydantic을 통한 타입 검증 및 변환
+
+```python
+# ❌ 잘못된 예시 (하드코딩)
+DEFAULT_PRICE = 100000.0
+cache_ttl = 60.0
+
+# ✅ 올바른 예시 (Settings 사용)
+class Settings(BaseModel):
+    default_price: float = float(os.getenv("DEFAULT_PRICE", "100000.0"))
+    cache_ttl: float = float(os.getenv("CACHE_TTL", "60.0"))
+
+settings = Settings()
+price = settings.default_price
+```
+
+#### 2. API 경로 및 TR_ID 관리
+- **완전한 .env 기반**: 모든 API 경로와 TR_ID는 `.env`에서 관리
+- **환경별 분리**: `_DEV`/`_PROD` 접미사로 환경별 설정 분리
+- **자동 환경 감지**: `_tr()` 메서드가 환경에 따라 자동으로 적절한 TR_ID 선택
+
+```python
+# src/adapters/kis/domestic.py
+PATH_BALANCE = os.getenv("KIS_PATH_BALANCE", "/uapi/domestic-stock/v1/trading/inquire-balance")
+
+def _tr(self, key: str) -> str:
+    if self.env in ("prod", "production", "real", "live"):
+        tr_id = os.getenv(f"KIS_TR_{key}_PROD") or os.getenv(f"KIS_TR_{key}")
+    else:
+        tr_id = os.getenv(f"KIS_TR_{key}_DEV") or os.getenv(f"KIS_TR_{key}")
+    
+    if not tr_id:
+        raise ValueError(f"TR_ID not found: KIS_TR_{key}_DEV/PROD or KIS_TR_{key} must be set in .env")
+    return tr_id
+```
+
+#### 3. CLI 명령어 구조
+- **공통 옵션**: `--env`, `--raw` 등은 `main.py`에서 정의
+- **기본값 관리**: 모든 기본값은 Settings에서 가져오기
+- **명령어 분리**: 각 기능별로 `src/cli/commands/` 디렉토리에 분리
+
+```python
+# src/cli/main.py
+from src.config import Settings
+
+settings = Settings()
+
+@app.command()
+def rebalance(config: str = settings.default_config_file, 
+              env: str = env_option, 
+              raw: bool = raw_option):
+    # 명령어 로직
+```
+
+#### 4. 서비스 레이어 구조
+- **Broker 인터페이스**: `src/services/brokers/base.py`에서 추상화
+- **구체적 구현**: `src/services/brokers/kis.py`에서 KIS 구현
+- **비즈니스 로직**: `src/services/` 디렉토리에 기능별 분리
+
+```python
+# src/services/brokers/base.py
+class Broker(Protocol):
+    async def fetch_balance(self) -> Dict[str, Any]: ...
+    async def fetch_price(self, code: str) -> float: ...
+    async def fetch_orderable_cash(self) -> Dict[str, Any]: ...
+    async def order_cash(self, code: str, qty: int, price: float | None, side: str) -> Dict[str, Any]: ...
+```
+
+#### 5. 에러 처리 및 로깅
+- **구조화된 로깅**: `src/utils/logging.py`의 `get_logger()` 사용
+- **명확한 에러 메시지**: 설정 누락 시 구체적인 해결 방법 제시
+- **Graceful Degradation**: API 실패 시 기본값으로 대체
+
+```python
+from src.utils.logging import get_logger
+
+log = get_logger("module.name")
+
+try:
+    result = await api_call()
+except Exception as e:
+    log.error(f"API 호출 실패: {e}")
+    return default_value
+```
+
+---
+
+### 사전 준비
+- Python 가상환경 활성화 후 의존성 설치
+```powershell
+cd "C:\Users\ghkdw\Desktop\개발 공부\Stock Rebalancer\kis-rebalancer"
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+- `.env` 환경별 설정 (권장)
+```ini
+# 실전 환경
+KIS_BASE_PROD=https://openapi.koreainvestment.com:9443
+KIS_APP_KEY_PROD=실전_앱키
+KIS_APP_SECRET_PROD=실전_시크릿
+KIS_ACCOUNT_8_PROD=실전계좌_앞8자리
+KIS_ACCOUNT_PD_PROD=22
+
+# 모의 환경
+KIS_BASE_DEV=https://openapivts.koreainvestment.com:29443
+KIS_APP_KEY_DEV=모의_앱키
+KIS_APP_SECRET_DEV=모의_시크릿
+KIS_ACCOUNT_8_DEV=모의계좌_앞8자리
+KIS_ACCOUNT_PD_DEV=01
+```
+
+- 레거시 단일 설정 (하위 호환)
+```ini
+KIS_BASE=https://openapi.koreainvestment.com:9443
+KIS_APP_KEY=발급키
+KIS_APP_SECRET=발급시크릿
+KIS_ACCOUNT_8=12345678
+KIS_ACCOUNT_PD=01
+```
+
+- 선택 항목(미입력 시 기본값 사용)
+```ini
+# === API 경로 설정 ===
+KIS_PATH_BALANCE=/uapi/domestic-stock/v1/trading/inquire-balance
+KIS_PATH_ORDER_CASH=/uapi/domestic-stock/v1/trading/order-cash
+KIS_PATH_PRICE=/uapi/domestic-stock/v1/quotations/inquire-price
+KIS_PATH_ORDERABLE_CASH=/uapi/domestic-stock/v1/trading/inquire-psbl-order
+KIS_PATH_MARKETSTATUS=/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice
+KIS_PATH_DAILY_ORDERS=/uapi/domestic-stock/v1/trading/inquire-daily-ccld
+
+# === TR_ID 설정 (환경별) ===
+# 모의투자 TR_ID
+KIS_TR_BALANCE_DEV=VTTC8434R
+KIS_TR_ORDER_BUY_DEV=VTTC0802U
+KIS_TR_ORDER_SELL_DEV=VTTC0801U
+KIS_TR_ORDER_CANCEL_DEV=VTTC8033U
+KIS_TR_PRICE_DEV=FHKST01010100
+KIS_TR_ORDERABLE_CASH_DEV=VTTC8908R
+KIS_TR_MARKETSTATUS_DEV=CTPF1002R
+KIS_TR_DAILY_ORDERS_DEV=VTTC8001R
+
+# 실전 TR_ID
+KIS_TR_BALANCE_PROD=TTTC8434R
+KIS_TR_ORDER_BUY_PROD=TTTC0802U
+KIS_TR_ORDER_SELL_PROD=TTTC0801U
+KIS_TR_ORDER_CANCEL_PROD=TTTC8033U
+KIS_TR_PRICE_PROD=FHKST01010100
+KIS_TR_ORDERABLE_CASH_PROD=TTTC8908R
+KIS_TR_MARKETSTATUS_PROD=CTPF1002R
+KIS_TR_DAILY_ORDERS_PROD=TTTC8001R
+
+# 레거시 TR_ID (환경 구분 없음)
+KIS_TR_BALANCE=VTTC8434R
+KIS_TR_ORDER_BUY=VTTC0802U
+KIS_TR_ORDER_SELL=VTTC0801U
+KIS_TR_PRICE=FHKST01010100
+KIS_TR_ORDERABLE_CASH=VTTC8908R
+KIS_TR_MARKETSTATUS=CTPF1002R
+KIS_TR_DAILY_ORDERS=VTTC8001R
+
+# === 토큰 및 캐시 설정 ===
+KIS_TOKEN_REFRESH_LEEWAY_SEC=600
+KIS_MARKETSTATUS_CACHE_TTL_SEC=60.0
+
+# === CLI 기본 설정 ===
+DEFAULT_CONFIG_FILE=targets.example.json
+DEFAULT_CRON_SCHEDULE=20 15 * * 1-5
+DEFAULT_ORDER_DELAY=1.0
+
+# === DRY_RUN 샘플 데이터 ===
+DEFAULT_DRY_RUN_PRICE=100000.0
+DEFAULT_DRY_RUN_CASH=1000000.0
+DEFAULT_DRY_RUN_QTY=1
+
+# === 리밸런싱 설정 ===
+DEFAULT_BAND_PCT=1.0
+DEFAULT_ORDER_STYLE=market
+MAX_ORDER_VALUE_PER_TICKER=10000000
+
+# 예수금 우선순위 설정 (실전 거래 관행 기준)
+# 주문가능현금 > D+2예수금 > D+1예수금 > 총예수금 순으로 자동 선택
+
+# === 레이트리밋 설정 ===
+KIS_GET_RPS=5
+KIS_GET_RPM=200
+KIS_POST_RPS=5
+KIS_POST_RPM=100
+```
+
+---
+
+### TR_ID 관리 방식
+- **완전한 .env 기반**: 모든 TR_ID는 `.env`에서 관리
+- **환경별 우선순위**: `KIS_TR_{API}_{ENV}` → `KIS_TR_{API}` → 에러
+- **자동 환경 구분**: `_tr()` 메서드가 환경에 따라 자동으로 `_DEV`/`_PROD` 접미사 추가
+- **에러 처리**: 환경변수가 없으면 명확한 에러 메시지 출력
+
+```python
+# 사용 예시
+tr_id = self._tr("BALANCE")  # KIS_TR_BALANCE_DEV 또는 KIS_TR_BALANCE에서 가져옴
+tr_id = self._tr("ORDER_BUY")  # KIS_TR_ORDER_BUY_DEV 또는 KIS_TR_ORDER_BUY에서 가져옴
+```
+
+---
+
+### 토큰 캐시 (환경별 분리)
+- **모의**: `token/kis_dev.json`
+- **실전**: `token/kis_prod.json`
+- 최초 발급 후 저장, 만료 임박 전까지 재사용
+- 401/403 발생 시 1회 재발급 후 캐시 갱신
+- 토큰 재발급: 캐시 파일 삭제 후 재실행
+
+---
+
+### 실행
+- 요약 출력(현금/예수금 + 보유 종목)
+```powershell
+# 모의 환경
+python -m src.cli.main balance --env dev
+# 실전 환경
+python -m src.cli.main balance --env prod
+```
+- 원문 JSON 출력
+```powershell
+python -m src.cli.main balance --env dev --raw
+python -m src.cli.main balance --env prod --raw
+```
+
+---
+
+### 토큰 재발급 방법
+```powershell
+# 환경별 토큰 캐시 삭제
+Remove-Item "token/kis_dev.json" -ErrorAction SilentlyContinue
+Remove-Item "token/kis_prod.json" -ErrorAction SilentlyContinue
+
+# 또는 한 번에 삭제
+python -c "import os; [os.remove(f) for f in ['token/kis_dev.json', 'token/kis_prod.json'] if os.path.exists(f)]"
+```
+
+---
+
+### 새로운 기능 개발 시 체크리스트
+
+#### 1. 설정 추가 시
+- [ ] `src/config.py`의 `Settings` 클래스에 새 설정 추가
+- [ ] 환경변수명을 명확하고 일관성 있게 명명
+- [ ] 기본값을 의미 있는 값으로 설정
+- [ ] 타입 힌트와 Pydantic 검증 추가
+
+#### 2. API 추가 시
+- [ ] API 경로를 `.env`에 `KIS_PATH_*` 형태로 추가
+- [ ] TR_ID를 환경별로 `.env`에 추가 (`KIS_TR_*_DEV/PROD`)
+- [ ] `KISDomestic` 클래스에 새 메서드 추가
+- [ ] `Broker` 인터페이스에 새 메서드 추가 (필요시)
+- [ ] `KISBroker`에서 구현 추가
+
+#### 3. CLI 명령어 추가 시
+- [ ] `src/cli/commands/` 디렉토리에 새 파일 생성
+- [ ] `src/cli/main.py`에서 명령어 등록
+- [ ] 공통 옵션(`--env`, `--raw`) 사용
+- [ ] 기본값은 `Settings`에서 가져오기
+
+#### 4. 서비스 로직 추가 시
+- [ ] `src/services/` 디렉토리에 기능별 파일 생성
+- [ ] `Broker` 인터페이스 활용
+- [ ] 구조화된 로깅 사용
+- [ ] 에러 처리 및 기본값 설정
+
+#### 5. 테스트 및 검증
+- [ ] DRY_RUN 모드로 동작 확인
+- [ ] `--raw` 옵션으로 원본 데이터 확인
+- [ ] 환경별(dev/prod) 동작 확인
+- [ ] 설정 누락 시 명확한 에러 메시지 확인
+
+---
+
+### 주의사항
+- 항상 프로젝트 루트에서 실행해 `.env`가 로드되도록 합니다.
+- 민감정보가 포함된 `token/` 폴더는 `.gitignore`에 포함되어 버전관리에 올라가지 않습니다.
+- 모의/실전 환경별로 다른 앱키/시크릿과 계좌 정보를 사용합니다.
+- `--raw` 옵션을 붙였을 때만 원문 JSON이 출력됩니다.
+- **하드코딩 금지**: 모든 설정값은 `.env` 또는 `Settings`에서 관리
+- **중앙 집중**: 새로운 설정은 반드시 `config.py`에 추가
