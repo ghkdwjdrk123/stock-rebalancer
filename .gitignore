@@ -63,3 +63,6 @@ token/
 # Temporary files
 *.tmp
 *.temp
+
+# Cursor 관련
+rules/
