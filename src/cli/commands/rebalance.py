@@ -154,7 +154,7 @@ async def _run(config: str, dry_run: bool, env: str = "dev", ignore_guards: bool
     log.info("1단계: 계좌조회 + 당일 주문체결 조회 - 종합 포지션 계산 중...")
     try:
         # 현재 보유 + 미체결 주문을 고려한 포지션 계산 (체결 주문은 이미 반영됨)
-        current_positions, expected_positions, adjusted_cash, d2_cash = await get_positions_with_daily_orders(broker)
+        current_positions, expected_positions, adjusted_cash, d2_cash, net_asset = await get_positions_with_daily_orders(broker)
         
         # 1단계 검증: 필수 데이터 확인
         if not current_positions and not expected_positions:

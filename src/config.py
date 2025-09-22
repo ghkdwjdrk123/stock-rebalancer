@@ -69,6 +69,10 @@ class Settings(BaseModel):
     retry_success_threshold: float = float(os.getenv("RETRY_SUCCESS_THRESHOLD", "0.8"))
     retry_max_duration_minutes: int = int(os.getenv("RETRY_MAX_DURATION_MINUTES", "30"))
     
+    # 미수 해결 리밸런싱 설정
+    deficit_reserve_ratio: float = float(os.getenv("DEFICIT_RESERVE_RATIO", "0.005"))  # 0.5% 기본 예비금
+    deficit_max_order_value: int = int(os.getenv("DEFICIT_MAX_ORDER_VALUE", "0"))  # 0 = 제한 없음
+    
     
     def get_token_cache_path(self, env: str) -> str:
         """환경별 토큰 캐시 경로 반환"""

@@ -5,8 +5,8 @@ from src.services.brokers.base import Broker
 from src.services.daily_orders import parse_daily_orders, get_pending_orders, get_pending_positions
 
 
-async def get_positions_and_cash(broker: Broker) -> tuple[dict[str, int], float, float]:
-    """브로커 잔고 응답에서 보유수량 dict와 주문가능현금을 파싱한다."""
+async def get_positions_and_cash(broker: Broker) -> tuple[dict[str, int], float, float, float]:
+    """브로커 잔고 응답에서 보유수량 dict, 주문가능현금, D+2예수금, 순자산금액을 파싱한다."""
     bal = await broker.fetch_balance()
 
     # 포지션 파싱
@@ -102,17 +102,29 @@ async def get_positions_and_cash(broker: Broker) -> tuple[dict[str, int], float,
     except Exception:
         d2_cash_value = None
 
+    # 순자산금액 파싱 (nass_amt)
+    nass_amt = _pick(summary, [
+        "nass_amt", "NASS_AMT", "순자산금액",
+        "tot_evlu_amt", "TOT_EVLU_AMT", "총평가금액"
+    ])
+    
+    try:
+        net_asset_value = float(nass_amt) if nass_amt is not None else 0.0
+    except Exception:
+        net_asset_value = 0.0
+
     # 로깅 (디버깅용)
     from src.utils.logging import get_logger
     log = get_logger("portfolio")
     log.debug(f"예수금 파싱: {cash_source} = {cash:,.0f}원")
     if d2_cash_value is not None:
         log.debug(f"D+2 예수금: {d2_cash_value:,.0f}원")
+    log.debug(f"순자산금액: {net_asset_value:,.0f}원")
 
-    return positions, cash, d2_cash_value
+    return positions, cash, d2_cash_value, net_asset_value
 
 
-async def get_positions_with_daily_orders(broker: Broker) -> Tuple[Dict[str, int], Dict[str, int], float, float]:
+async def get_positions_with_daily_orders(broker: Broker) -> Tuple[Dict[str, int], Dict[str, int], float, float, float]:
     """
     현재 보유 포지션 + 미체결 주문을 고려한 예상 포지션을 반환
     
@@ -120,14 +132,15 @@ async def get_positions_with_daily_orders(broker: Broker) -> Tuple[Dict[str, int
         broker: 브로커 인스턴스
     
     Returns:
-        Tuple[Dict[str, int], Dict[str, int], float, float]:
+        Tuple[Dict[str, int], Dict[str, int], float, float, float]:
         - 현재 보유 포지션 {종목코드: 수량} (이미 당일 체결 주문 반영됨)
         - 미체결 주문 고려 예상 포지션 {종목코드: 수량}  
         - 주문가능현금 (이미 당일 체결 주문 반영됨)
         - D+2 예수금 (미수 해결을 위해)
+        - 순자산금액 (리밸런싱 기준)
     """
     # 1. 현재 잔고 조회
-    positions, cash, d2_cash = await get_positions_and_cash(broker)
+    positions, cash, d2_cash, net_asset = await get_positions_and_cash(broker)
     
     # 2. 당일 주문체결 조회
     try:
@@ -149,14 +162,14 @@ async def get_positions_with_daily_orders(broker: Broker) -> Tuple[Dict[str, int
         # 현금은 그대로 사용 (체결 주문으로 인한 현금 변동은 이미 반영됨)
         adjusted_cash = cash
         
-        return positions, expected_positions, adjusted_cash, d2_cash
+        return positions, expected_positions, adjusted_cash, d2_cash, net_asset
         
     except Exception as e:
         # 일별 주문 조회 실패 시 현재 포지션만 반환
         from src.utils.logging import get_logger
         log = get_logger("portfolio")
         log.warning(f"일별 주문 조회 실패: {e}, 현재 포지션만 사용")
-        return positions, positions.copy(), cash, d2_cash
+        return positions, positions.copy(), cash, d2_cash, net_asset
 
 
 async def get_positions_with_pending(broker: Broker) -> Tuple[Dict[str, int], Dict[str, int], float]:

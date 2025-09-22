@@ -41,8 +41,13 @@ async def build_plan(
         validated_plan = plan
         final_cash = calculate_final_cash(plan, cash, prices)
     
-    # 3. 수수료 최적화: 동일 종목 매도/매수 주문 통합
-    optimized_plan = optimize_order_sequence(validated_plan, cash, prices)
+    # 3. 수수료 최적화: 동일 종목 매도/매수 주문 통합 (미수 해결 모드에서는 비활성화)
+    if cash >= 0:
+        # 정상 상황: 수수료 최적화 적용
+        optimized_plan = optimize_order_sequence(validated_plan, cash, prices)
+    else:
+        # 미수 상황: 수수료 최적화 비활성화 (의도적인 매도→매수 순서 보존)
+        optimized_plan = validated_plan
     
     from src.utils.logging import get_logger
     log = get_logger("rebalance_executor")
