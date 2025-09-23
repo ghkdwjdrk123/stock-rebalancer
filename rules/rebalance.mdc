@@ -16,18 +16,31 @@ alwaysApply: false
 ### 타깃 설정 (targets.json)
 ```json
 {
-  "band_pct": 1.0,
-  "order_style": "market",
+  "account_info": {
+    "broker": "kis",
+    "env": "dev",
+    "account_8": "XXXXXXXX",
+    "account_pd": "01",
+    "description": "테스트 케이스 2 - 집중 투자"
+  },
+  "rebalance_config": {
+    "band_pct": 1.0,
+    "order_style": "market",
+    "safety_margin_pct": 0.5
+  },
   "tickers": {
-    "379810": 0.6,
-    "005930": 0.3,
-    "000660": 0.1
+    "379810": 0.60,
+    "458730": 0.30,
+    "329750": 0.10
   }
 }
 ```
 
-- **band_pct**: 목표 비중 대비 허용 밴드(%)
-- **order_style**: 주문 방식 (현재 "market" 고정)
+- **account_info**: 계좌 정보 (broker, env, account_8, account_pd, description)
+- **rebalance_config**: 리밸런싱 설정
+  - **band_pct**: 목표 비중 대비 허용 밴드(%)
+  - **order_style**: 주문 방식 (현재 "market" 고정)
+  - **safety_margin_pct**: 안전여유율 (%) - 전체 자산 기준으로 현금 보유
 - **tickers**: 종목코드별 목표 비중 (합계 1.0)
 
 ---
@@ -36,53 +49,76 @@ alwaysApply: false
 
 #### 시뮬레이션 (DRY_RUN)
 ```powershell
-# 모의 환경
-python -m src.cli.main rebalance --config targets.example.json --env dev --dry-run
+# 모의 환경 (자동 설정 파일 선택)
+python -m src.cli.main rebalance --env dev --dry-run
 # 실전 환경
-python -m src.cli.main rebalance --config targets.example.json --env prod --dry-run
+python -m src.cli.main rebalance --env prod --dry-run
 ```
 
 #### 실제 주문 실행
 ```powershell
 # 모의 환경 (장시간 외 강제 실행)
-python -m src.cli.main rebalance --config targets.example.json --env dev --no-dry-run --ignore-guards
+python -m src.cli.main rebalance --env dev --no-dry-run --ignore-guards
 # 실전 환경 (장시간 내만 가능)
-python -m src.cli.main rebalance --config targets.example.json --env prod --no-dry-run
+python -m src.cli.main rebalance --env prod --no-dry-run
 ```
 
-#### 원문 JSON 출력
+#### 고급 옵션
 ```powershell
-python -m src.cli.main rebalance --config targets.example.json --env dev --dry-run --raw
+# 원문 JSON 출력
+python -m src.cli.main rebalance --env dev --dry-run --raw
+
+# 안전 모드 활성화
+python -m src.cli.main rebalance --env dev --no-dry-run --safety-mode
+
+# 엄격한 취소 모드
+python -m src.cli.main rebalance --env dev --no-dry-run --strict-cancellation
+
+# 지속적 재시도 활성화
+python -m src.cli.main rebalance --env dev --no-dry-run --persistent-retry --retry-threshold 0.8
 ```
+
 
 ---
 
-### 리밸런싱 로직 (1~5단계)
+### 리밸런싱 로직 (0~4단계)
 
-#### 1~2단계: 계좌조회 API로 보유 종목 + 주문가능현금 파악
+#### 0단계: 미체결 주문 취소
+- **목적**: 깔끔한 상태에서 리밸런싱 시작
+- **전략**: 모든 미체결 주문 취소 후 리밸런싱
+- **API**: `/uapi/domestic-stock/v1/trading/order-rvsecncl`
+- **실패 시**: 후속 단계 진행 중단
+
+#### 1단계: 계좌조회 API로 보유 종목 + 주문가능현금 파악
 - **API**: `inquire_balance` (KIS_TR_BALANCE_DEV/PROD)
 - **목적**: 
   - `output1`: 현재 보유 종목과 수량 파악
   - `output2.dnca_tot_amt`: 주문가능현금 파악
+  - `output2.nass_amt` 또는 `output2.tot_evlu_amt`: 총자산 파악 (API 우선 사용)
 - **출력**: 
   - `{종목코드: 수량}` 딕셔너리
   - 주문가능현금 (float)
+  - 총자산 (float) - API에서 제공하는 값 우선 사용
 - **에러 처리**: 조회 실패 시 프로세스 중단
-- **참고**: `dnca_tot_amt`는 전체 주문 가능 자금을 대략적으로 반영
+- **참고**: `tot_evlu_amt` (총평가금액)을 우선적으로 사용하여 정확한 총자산 파악
 
-#### 3단계: 가격 조회
+#### 2단계: 가격 조회
 - **API**: `inquire_price` (KIS_TR_PRICE_DEV/PROD)
 - **목적**: 대상 종목별 현재가 조회
 - **출력**: `{종목코드: 가격}` 딕셔너리
 - **에러 처리**: 개별 종목 실패 시 0.0으로 처리
 
-#### 4단계: 리밸런싱 계획 수립
-- **전체 자산가치**: `현금 + Σ(가격 × 수량)`
-- **현재 비중**: 각 종목의 현재 비중 계산
-- **밴드 체크**: 목표 비중 대비 허용 밴드 초과 시 주문 대상
+#### 3단계: 리밸런싱 계획 수립
+- **전체 자산가치**: API `tot_evlu_amt` 우선 사용, 없으면 `현금 + Σ(가격 × 수량)` 계산
+- **가상 예수금 시스템**: 모의투자 환경에서 안전여유율 적용
+  - 안전여유금 = 전체 자산 × `safety_margin_pct`
+  - 주문가능현금 = D+2 예수금 - 안전여유금
+- **포트폴리오 레벨 밴드**: 가상 전량 청산 기반 리밸런싱
+  - 개별 종목 밴드 체크 + 전체 비중 합 100% 보장
+  - 순복합 델타 계산 (동일 종목 매도/매수 중복 방지)
 - **매도 우선**: 매도 → 매수 순서로 실행 (현금 확보 후 매수)
 
-#### 5단계: 실제 매매/매도 API 실행
+#### 4단계: 실제 매매/매도 API 실행
 - **API**: `order_cash` (KIS_TR_ORDER_BUY/SELL_DEV/PROD)
 - **시장가 주문**: `limit=None`으로 시장가 주문
 - **멱등성**: 동일 주문 중복 방지 (side:code:qty:limit 키)
@@ -95,18 +131,19 @@ python -m src.cli.main rebalance --config targets.example.json --env dev --dry-r
 
 #### 단계별 로깅 (요약 출력)
 ```
-[2025-09-15 23:20:10] 1~2단계: 계좌조회 API로 보유 종목 및 주문가능현금 조회 중...
+[2025-09-15 23:20:10] 0단계: 미체결 주문 취소 중...
+[2025-09-15 23:20:10] 1단계: 계좌조회 API로 보유 종목 및 주문가능현금 조회 중...
 [2025-09-15 23:20:10] 보유 종목: 2개 - {'379810': 1, '005930': 0}
 [2025-09-15 23:20:10] 주문가능현금: 1,000,000원 (dnca_tot_amt 기준)
-[2025-09-15 23:20:10] 3단계: 대상 종목 가격 조회 중...
+[2025-09-15 23:20:10] 2단계: 대상 종목 가격 조회 중...
 [2025-09-15 23:20:10] 가격 조회 완료: 2개 종목
-[2025-09-15 23:20:10] 4단계: 리밸런싱 계획 수립 중...
+[2025-09-15 23:20:10] 3단계: 리밸런싱 계획 수립 중...
 [2025-09-15 23:20:10] 목표 비중: {'379810': 0.6, '005930': 0.4}
 [2025-09-15 23:20:10] 허용 밴드: 1.0%
 [2025-09-15 23:20:10] Planned Orders (2):
 SELL 379810 x1 (시장가)
 BUY 005930 x2 (시장가)
-[2025-09-15 23:20:10] 5단계: 주문 실행 중...
+[2025-09-15 23:20:10] 4단계: 주문 실행 중...
 [2025-09-15 23:20:10] 실행할 주문: 2건
 [2025-09-15 23:20:10] 주문 실행 완료: 2건
 ```
@@ -180,6 +217,101 @@ BUY 005930 x2 (시장가)
 
 ---
 
+### 고급 리밸런싱 로직
+
+#### 포트폴리오 레벨 밴드 (Portfolio-Level Band)
+- **목적**: 포트폴리오 전체가 목표 비중에 맞춰 조정되도록 보장
+- **핵심 개념**: 
+  - **가상 전량 청산**: 현재 주식을 모두 매도한다고 가정하고 목표 비중으로 재구성
+  - **개별 종목 밴드**: 각 종목이 목표 비중 대비 ±`band_pct` 범위 내에 있는지 체크
+  - **전체 합 보장**: 포트폴리오 전체 비중이 100%가 되도록 현금 조정
+- **순복합 델타**: 동일 종목에서 매도와 매수 동시 발생 방지
+- **효과**: 수수료 절약, 포트폴리오 안정성, 정확한 비중 달성
+
+#### 밴드 기반 리밸런싱 (기존 방식)
+- **목적**: 불필요한 거래 방지 (조절 불가능한 상황을 위한 안전장치)
+- **기준**: 1개 종목이라도 밴드(1.0%) 초과 시 전체 리밸런싱
+- **효과**: 수수료 절약 및 포트폴리오 안정성
+
+#### 현금 부족 시 대응 전략
+- **문제**: 목표 비중 달성 시 현금 부족 발생
+- **해결**: 목표 비중을 현금 범위에 맞게 조정
+- **로직**:
+  ```
+  현금 비율 = 현금 / 전체 자산
+  주식 비중 = 1 - 현금 비율
+  조정된 목표 = 현재 비중 × 주식 비중
+  ```
+
+#### 가상 예수금 시스템 (모의투자)
+- **문제**: 모의투자에서 `dnca_tot_amt` 고정값으로 실전과 차이
+- **해결**: 전체 자산 기준 안전여유율 적용 (JSON 설정으로 조정 가능)
+- **계산**:
+  ```
+  전체 자산 = API tot_evlu_amt 우선 사용 (없으면 보유 주식 가치 + D+2 예수금)
+  안전여유금 = 전체 자산 × safety_margin_pct (기본 0.5%)
+  주문가능현금 = D+2 예수금 - 안전여유금
+  ```
+- **설정**: `rebalance_config.safety_margin_pct`로 조정 가능 (0.5%, 1.0%, 2.0% 등)
+
+#### 미체결 주문 취소 전략
+- **전략**: "모든 미체결 주문 취소 후 리밸런싱"
+- **API**: `/uapi/domestic-stock/v1/trading/order-rvsecncl`
+- **장점**: 높은 안정성, 단순한 로직
+- **단점**: 취소 수수료 없음 (실제 거래에 영향 없음)
+
+#### 수수료 최적화
+- **목적**: 동일 종목 매도/매수 주문 통합으로 수수료 절약
+- **조건**: `cash >= 0`일 때만 적용 (미수 해결 모드에서는 비활성화)
+- **로직**: 매도 수량과 매수 수량을 상쇄하여 순매도/순매수만 실행
+
+---
+
+
+---
+
+### 포트폴리오 레벨 밴드 상세 설명
+
+#### 핵심 개념
+1. **가상 전량 청산 (Virtual Full Liquidation)**
+   - 현재 보유 주식을 모두 매도한다고 가정
+   - 확보된 현금으로 목표 비중에 맞게 재구성
+   - 실제로는 매도-매수 동시 실행으로 효율성 확보
+
+2. **개별 종목 밴드 vs 전체 합 보장**
+   - 각 종목: 목표 비중 대비 ±`band_pct` 범위 체크
+   - 포트폴리오 전체: 비중 합이 반드시 100% 유지
+   - 현금도 포트폴리오의 일부로 포함하여 조정
+
+3. **순복합 델타 (Net Composite Delta)**
+   - 동일 종목에서 매도와 매수 동시 발생 방지
+   - 예: 329750 현재 152주 → 목표 77주 = **매도 75주만** 실행
+   - 무의미한 라운드 트립 거래 제거
+
+#### 실행 예시 (dev 환경)
+```
+현재 보유: 329750(152주), 379810(262주), 458730(164주)
+목표 비중: 329750(10%), 379810(60%), 458730(30%)
+
+밴드 분석:
+- 329750: 19.6% → 9.9% (차이: 9.7%p > 1.0%p) → 매도 필요
+- 379810: 60.5% → 59.5% (차이: 1.0%p = 1.0%p) → 밴드 준수
+- 458730: 19.8% → 29.9% (차이: 10.1%p > 1.0%p) → 매수 필요
+
+최종 계획:
+- SELL 329750 75주 (964,875원)
+- BUY 458730 81주 (973,782원)
+- 379810: 거래 없음 (밴드 준수)
+```
+
+#### 장점
+- **정확성**: 포트폴리오 전체가 목표 비중에 정확히 맞춰짐
+- **효율성**: 불필요한 거래 제거로 수수료 절약
+- **안정성**: 현금 부족 문제 해결 (매도로 현금 확보 후 매수)
+- **투명성**: 명확한 로직으로 예측 가능한 결과
+
+---
+
 ### 개발 구조
 
 #### 파일 구조
@@ -207,9 +339,11 @@ src/
 
 #### 주요 클래스/함수
 - **KISBroker**: KIS API를 Broker 인터페이스로 래핑
-- **plan_rebalance**: 리밸런싱 계획 수립
+- **plan_rebalance**: 리밸런싱 계획 수립 (포트폴리오 레벨 밴드 적용)
+- **plan_rebalance_with_band**: 포트폴리오 레벨 밴드 핵심 로직
+- **calculate_virtual_cash**: 가상 예수금 시스템 계산
 - **execute_plan**: 주문 실행 및 결과 수집
-- **get_positions_and_cash**: 잔고에서 포지션/현금 파싱
+- **get_positions_and_cash**: 잔고에서 포지션/현금/총자산 파싱
 - **is_trading_day/is_market_open_now**: 영업일/장중 가드
 
 ---

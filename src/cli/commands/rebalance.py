@@ -36,6 +36,7 @@ def load_targets(path: str) -> Dict[str, float]:
         return {
             "band_pct": float(rebalance_config.get("band_pct", 1.0)),
             "order_style": rebalance_config.get("order_style", "market"),
+            "safety_margin_pct": float(rebalance_config.get("safety_margin_pct", 1.0)),
             "tickers": data["tickers"],
             "account_info": account_info
         }
@@ -44,6 +45,7 @@ def load_targets(path: str) -> Dict[str, float]:
         return {
             "band_pct": float(data.get("band_pct", 1.0)),
             "order_style": data.get("order_style", "market"),
+            "safety_margin_pct": float(data.get("safety_margin_pct", 1.0)),
             "tickers": data["tickers"],
         }
 
@@ -110,6 +112,8 @@ async def _run(config: str, dry_run: bool, env: str = "dev", ignore_guards: bool
             band_pct=targets["band_pct"],
             max_order_value_per_ticker=st.max_order_value_per_ticker,
             d2_cash=d2_cash,
+            safety_margin_pct=targets["safety_margin_pct"],
+            total_asset_value=None,  # DRY_RUN에서는 총자산 없음
             broker=None,  # DRY_RUN에서는 broker 없음
         )
         
@@ -260,6 +264,8 @@ async def _run(config: str, dry_run: bool, env: str = "dev", ignore_guards: bool
             band_pct=targets["band_pct"],
             max_order_value_per_ticker=st.max_order_value_per_ticker,
             d2_cash=d2_cash,
+            safety_margin_pct=targets["safety_margin_pct"],
+            total_asset_value=net_asset,  # API 총자산 사용
             broker=broker,
         )
         

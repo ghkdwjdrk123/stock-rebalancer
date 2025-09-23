@@ -18,6 +18,8 @@ async def build_plan(
     band_pct: float,
     max_order_value_per_ticker: int,
     d2_cash: float = None,
+    safety_margin_pct: float = 1.0,
+    total_asset_value: float = None,
     broker=None,
 ) -> List[OrderPlan]:
     # 1. 깔끔한 리밸런싱 계획 수립 (모든 미체결 주문 취소 후)
@@ -29,6 +31,8 @@ async def build_plan(
         band_pct=band_pct,
         max_order_value_per_ticker=max_order_value_per_ticker,
         d2_cash=d2_cash,
+        safety_margin_pct=safety_margin_pct,
+        total_asset_value=total_asset_value,
         broker=broker,
     )
     
