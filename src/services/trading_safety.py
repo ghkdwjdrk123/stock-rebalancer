@@ -138,28 +138,20 @@ class TradingSafetyManager:
             return await self._execute_batch_legacy(orders)
     
     async def _execute_batch_with_persistent_retry(self, orders: List[Any]) -> TradingBatch:
-        """지속적 재시도로 배치 실행"""
-        from src.services.retry_strategy import BatchRetryManager, RetryConfig
+        """지속적 재시도로 배치 실행 (간소화된 버전)"""
+        # retry_strategy.py가 삭제되어 간소화된 버전 사용
         
-        # 재시도 설정 (거래는 90% 성공률 목표)
-        retry_config = RetryConfig(
-            max_attempts=4,
-            base_delay=5.0,
-            max_delay=60.0,
-            backoff_multiplier=2.0,
-            jitter=True,
-            success_threshold=0.9  # 90% 이상 성공 시 완료
-        )
+        batch = TradingBatch(orders=orders, total_orders=len(orders), results=[])
         
-        retry_manager = BatchRetryManager(retry_config)
-        
-        async def batch_operation():
+        try:
             # 사전 검증
             if not await self.validate_trading_environment():
-                raise Exception("거래 환경 검증 실패")
+                log.error("❌ 거래 환경 검증 실패")
+                return batch
                 
             if not await self.validate_order_plan(orders):
-                raise Exception("주문 계획 검증 실패")
+                log.error("❌ 주문 계획 검증 실패")
+                return batch
             
             # 단계별 실행 (매도 먼저, 매수 나중에)
             sell_orders = [o for o in orders if o.side == 'SELL']
@@ -176,7 +168,15 @@ class TradingSafetyManager:
                 # 매도 실패 시 예외 발생
                 failed_sells = [r for r in sell_results if not r.success]
                 if failed_sells:
-                    raise Exception(f"매도 주문 {len(failed_sells)}건 실패")
+                    log.error(f"❌ 매도 주문 {len(failed_sells)}건 실패")
+                    batch.results = [TradingResult(
+                        success=r.get("success", False),
+                        order_id=r.get("order_id"),
+                        message=r.get("message", "")
+                    ) for r in results]
+                    batch.executed_orders = sum(1 for r in batch.results if r.success)
+                    batch.failed_orders = len(batch.results) - batch.executed_orders
+                    return batch
             
             # 2단계: 매수 주문 실행 (매도 성공 후에만)
             if buy_orders:
@@ -184,36 +184,22 @@ class TradingSafetyManager:
                 buy_results = await self._execute_order_batch(buy_orders, "BUY")
                 results.extend(buy_results)
             
-            return results
-        
-        result = await retry_manager.execute_batch_with_retry(
-            batch_operation,
-            "배치 거래 실행"
-        )
-        
-        # 결과를 TradingBatch로 변환
-        batch = TradingBatch(orders=orders, total_orders=len(orders), results=[])
-        
-        if result["success"]:
+            # 결과 변환
             batch.results = [TradingResult(
                 success=r.get("success", False),
                 order_id=r.get("order_id"),
                 message=r.get("message", "")
-            ) for r in result["results"]]
+            ) for r in results]
             batch.executed_orders = sum(1 for r in batch.results if r.success)
             batch.failed_orders = len(batch.results) - batch.executed_orders
-            log.info(f"✅ 지속적 재시도로 배치 실행 성공: {result['success_rate']:.1%}")
-        else:
-            log.warning(f"⚠️ 지속적 재시도 후에도 배치 실행 부분 실패: {result['message']}")
-            # 부분 성공 결과라도 반환
-            if "results" in result:
-                batch.results = [TradingResult(
-                    success=r.get("success", False),
-                    order_id=r.get("order_id"),
-                    message=r.get("message", "")
-                ) for r in result["results"]]
-                batch.executed_orders = sum(1 for r in batch.results if r.success)
-                batch.failed_orders = len(batch.results) - batch.executed_orders
+            
+            success_rate = batch.executed_orders / batch.total_orders if batch.total_orders > 0 else 1.0
+            log.info(f"✅ 배치 실행 완료: {success_rate:.1%}")
+            
+        except Exception as e:
+            log.error(f"❌ 배치 실행 중 오류: {e}")
+            batch.executed_orders = 0
+            batch.failed_orders = batch.total_orders
         
         return batch
     
@@ -365,40 +351,36 @@ class TradingSafetyManager:
             return False
     
     async def _execute_cancellation_with_persistent_retry(self) -> bool:
-        """지속적 재시도로 주문 취소 실행"""
-        from src.services.retry_strategy import BatchRetryManager, RetryConfig
+        """지속적 재시도로 주문 취소 실행 (간소화된 버전)"""
+        # retry_strategy.py가 삭제되어 간소화된 버전 사용
         
-        # 재시도 설정 (취소는 80% 성공률 목표)
-        retry_config = RetryConfig(
-            max_attempts=5,
-            base_delay=3.0,
-            max_delay=30.0,
-            backoff_multiplier=1.5,
-            jitter=True,
-            success_threshold=0.8  # 80% 이상 성공 시 완료
-        )
-        
-        retry_manager = BatchRetryManager(retry_config)
-        
-        async def cancellation_operation():
+        try:
             from src.services.order_canceler import cancel_all_pending_orders
-            return await cancel_all_pending_orders(self.broker)
-        
-        result = await retry_manager.execute_batch_with_retry(
-            cancellation_operation,
-            "미체결 주문 취소"
-        )
-        
-        if result["success"]:
-            if result.get("success_rate", 0) == 1.0 and "처리할 항목이 없음" in result.get("message", ""):
-                log.info(f"✅ 미체결 주문 취소 완료: {result['message']}")
+            cancel_results = await cancel_all_pending_orders(self.broker)
+            
+            if cancel_results is None:
+                log.warning("⚠️ 취소 결과를 받을 수 없습니다.")
+                return False
+            
+            success_count = sum(1 for r in cancel_results if r["success"])
+            total_count = len(cancel_results)
+            
+            if total_count == 0:
+                log.info("✅ 취소할 미체결 주문이 없습니다.")
+                return True
+                
+            if success_count == total_count:
+                log.info(f"✅ 미체결 주문 취소 완료: {success_count}건 성공")
+                return True
             else:
-                log.info(f"✅ 지속적 재시도로 주문 취소 성공: {result['success_rate']:.1%}")
-            return True
-        else:
-            log.warning(f"⚠️ 지속적 재시도 후에도 주문 취소 부분 실패: {result['message']}")
-            # 부분 성공도 허용 (일부 취소 실패는 심각하지 않음)
-            return True
+                success_rate = success_count / total_count
+                log.warning(f"⚠️ 미체결 주문 취소 부분 성공: {success_count}/{total_count}건 ({success_rate:.1%})")
+                # 부분 성공도 허용 (일부 취소 실패는 심각하지 않음)
+                return True
+                
+        except Exception as e:
+            log.error(f"❌ 주문 취소 실행 중 오류: {e}")
+            return False
     
     async def _execute_cancellation_legacy(self) -> bool:
         """기존 방식의 주문 취소 실행"""

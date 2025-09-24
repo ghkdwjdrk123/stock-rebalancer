@@ -115,6 +115,8 @@ async def _run(config: str, dry_run: bool, env: str = "dev", ignore_guards: bool
             safety_margin_pct=targets["safety_margin_pct"],
             total_asset_value=None,  # DRY_RUN에서는 총자산 없음
             broker=None,  # DRY_RUN에서는 broker 없음
+            is_mock=True,  # DRY_RUN은 모의환경
+            orderable_cash=None,  # DRY_RUN에서는 주문가능현금 없음
         )
         
         if raw:
@@ -256,6 +258,16 @@ async def _run(config: str, dry_run: bool, env: str = "dev", ignore_guards: bool
             log.error("🚫 리밸런싱을 중단합니다.")
             return
             
+        # 실전환경에서 주문가능현금 조회
+        orderable_cash = None
+        if env == "prod":
+            try:
+                from src.services.portfolio import get_orderable_cash
+                orderable_cash = await get_orderable_cash(broker)
+                log.info(f"🔍 실전환경 주문가능현금: {orderable_cash:,.0f}원")
+            except Exception as e:
+                log.warning(f"⚠️ 주문가능현금 조회 실패: {e}, D+2 예수금 사용")
+        
         plan = await build_plan(
             positions=positions,
             targets=targets["tickers"],
@@ -267,6 +279,8 @@ async def _run(config: str, dry_run: bool, env: str = "dev", ignore_guards: bool
             safety_margin_pct=targets["safety_margin_pct"],
             total_asset_value=net_asset,  # API 총자산 사용
             broker=broker,
+            is_mock=(env == "dev"),  # 환경에 따라 설정
+            orderable_cash=orderable_cash,  # 실전환경에서 사용할 주문가능현금
         )
         
         # 3단계 검증: 계획 수립 결과 확인

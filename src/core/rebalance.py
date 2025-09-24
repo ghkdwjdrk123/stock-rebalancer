@@ -11,16 +11,21 @@ def calculate_virtual_cash(
     is_mock: bool = True,
     safety_margin_pct: float = 1.0,
     cash: float = None,
-    total_asset_value: float = None
+    total_asset_value: float = None,
+    orderable_cash: float = None
 ) -> Tuple[float, float]:
     """
-    모의투자에서 실전과 유사한 가상 예수금 계산
+    환경별 가상 예수금 계산
     
     Args:
         positions: 현재 보유 종목 수량
         prices: 종목별 현재가
-        d2_cash: D+2 예수금 (모의투자 API 응답)
+        d2_cash: D+2 예수금
         is_mock: 모의투자 여부 (기본값: True)
+        safety_margin_pct: 안전여유율 (%)
+        cash: 기본 현금값 (fallback)
+        total_asset_value: API 총자산값
+        orderable_cash: 주문가능현금 (실전환경에서 사용)
         
     Returns:
         Tuple[float, float]: (전체 자산 가치, 실제 주문가능현금)
@@ -43,9 +48,24 @@ def calculate_virtual_cash(
         log.info(f"💰 계산된 총자산 사용: {total_asset_value:,.0f}원 (보유주식: {portfolio_value:,.0f}원 + 현금: {effective_d2_cash:,.0f}원)")
     
     if not is_mock:
-        # 실전 환경: 주문가능현금을 사용 (ord_psbl_cash)
-        # 주문가능현금이 제공되지 않는 경우 D+2 예수금 사용
-        available_cash = d2_cash  # 실제로는 ord_psbl_cash를 사용해야 함
+        # 실전 환경: 주문가능현금 사용 + 안전여유율 적용
+        base_cash = orderable_cash if orderable_cash is not None else effective_d2_cash
+        
+        safety_margin = safety_margin_pct / 100.0  # 퍼센트를 소수로 변환
+        safety_amount = total_asset_value * safety_margin
+        available_cash = base_cash - safety_amount
+        
+        log.info(f"💰 가상 예수금 계산 (실전환경):")
+        log.info(f"  - 보유 주식 가치: {portfolio_value:,.0f}원")
+        if orderable_cash is not None:
+            log.info(f"  - 주문가능현금: {orderable_cash:,.0f}원 (실거래 기준)")
+        else:
+            log.info(f"  - D+2 예수금: {effective_d2_cash:,.0f}원 (fallback)")
+        log.info(f"  - 전체 자산 가치: {total_asset_value:,.0f}원")
+        log.info(f"  - 안전여유율: {safety_margin*100:.1f}% (전체 자산 기준)")
+        log.info(f"  - 안전여유금: {safety_amount:,.0f}원")
+        log.info(f"  - 최종 주문가능현금: {available_cash:,.0f}원")
+        
         return total_asset_value, available_cash
     
     # 모의투자 환경: 전체 자산 기준 안전여유율 적용
@@ -71,7 +91,9 @@ async def plan_rebalance(positions: Dict[str, int], targets: Dict[str, float],
                          d2_cash: float = None,
                          safety_margin_pct: float = 1.0,
                          total_asset_value: float = None,
-                         broker=None) -> List[OrderPlan]:
+                         broker=None,
+                         is_mock: bool = True,
+                         orderable_cash: float = None) -> List[OrderPlan]:
     """
     깔끔한 리밸런싱 계획 수립
     
@@ -133,10 +155,11 @@ async def plan_rebalance(positions: Dict[str, int], targets: Dict[str, float],
         positions=positions,
         prices=prices,
         d2_cash=d2_cash,  # D+2 예수금 (None일 수 있음)
-        is_mock=True,   # 모의투자 환경
+        is_mock=is_mock,  # 환경 구분 (모의/실전)
         safety_margin_pct=safety_margin_pct,
         cash=cash,  # d2_cash가 None일 때 사용할 현금
-        total_asset_value=total_asset_value  # API 총자산 (None이면 계산된 값 사용)
+        total_asset_value=total_asset_value,  # API 총자산 (None이면 계산된 값 사용)
+        orderable_cash=orderable_cash  # 실전환경에서 사용할 주문가능현금
     )
     
     # 전체 자산 가치를 리밸런싱 기준으로 사용
@@ -178,8 +201,7 @@ def plan_rebalance_with_deficit(
     from src.utils.logging import get_logger
     log = get_logger("rebalance.deficit")
     
-    # 간단한 미수 해결 로직 (기존 로직과 호환)
-    log.info(f"미수 해결 모드: 현금 {cash:,.0f}원")
+    log.info(f"🔧 미수 해결 모드 시작 - 현재 현금: {cash:,.0f}원")
     
     # 유효성 검사
     tickers = set(targets.keys()) | set(positions.keys())
@@ -189,8 +211,159 @@ def plan_rebalance_with_deficit(
         log.warning("거래 가능한 종목이 없습니다.")
         return []
     
-    # 간단한 미수 해결: 현재는 빈 리스트 반환 (기존 로직과 호환)
-    return []
+    # 1. 가상 전량 청산으로 전체 자산 계산 (미수 상황 고려)
+    portfolio_value = sum(prices[t] * positions.get(t, 0) for t in usable)
+    
+    # 미수 상황에서는 실제 음수 현금을 반영하여 전체 자산 계산
+    # 예: 보유주식 1000만원, 현금 -1254만원 = 전체 자산 -254만원 (미수 상태)
+    total_asset = portfolio_value + cash  # cash가 음수여도 그대로 반영
+    
+    log.info(f"📊 가상 전량 청산 기준:")
+    log.info(f"  - 보유 주식 가치: {portfolio_value:,.0f}원")
+    log.info(f"  - 현재 현금: {cash:,.0f}원")
+    log.info(f"  - 전체 자산: {total_asset:,.0f}원")
+    log.info(f"  - 미수 금액: {abs(cash):,.0f}원" if cash < 0 else "  - 현금 상태: 정상")
+    
+    # 2. 미수 해결 전략: 기존 리밸런싱 전략과 동일 (전체 자산 기준 목표 비중 계산)
+    if cash < 0:
+        # 미수 상황: 기존 리밸런싱 전략과 동일하게 전체 자산 기준으로 목표 비중 계산
+        deficit_amount = abs(cash)
+        log.info(f"🔧 미수 해결 전략 (기존 리밸런싱 전략과 동일):")
+        log.info(f"  - 미수 금액: {deficit_amount:,.0f}원")
+        log.info(f"  - 전체 자산 기준으로 목표 비중 계산")
+        log.info(f"  - 현재 vs 목표 비교하여 매도/매수 주문 생성")
+        
+        # 가상 전량 매도 후 미수금 해결한 잔여 현금 계산
+        virtual_sell_proceeds = portfolio_value  # 가상 전량 매도 대금
+        remaining_cash_after_deficit = virtual_sell_proceeds - deficit_amount
+        
+        log.info(f"💰 가상 전량 매도 후 현금 흐름:")
+        log.info(f"  - 매도 대금: {virtual_sell_proceeds:,.0f}원")
+        log.info(f"  - 미수금 해결: -{deficit_amount:,.0f}원")
+        log.info(f"  - 잔여 현금: {remaining_cash_after_deficit:,.0f}원")
+        
+        if remaining_cash_after_deficit <= 0:
+            # 전량 매도로도 미수 해결 불가능
+            log.warning(f"⚠️ 가상 전량 매도로도 미수 해결이 불가능합니다.")
+            log.warning(f"⚠️ 모든 종목을 매도하여 최대한 현금을 확보합니다.")
+            target_qty = {t: 0 for t in usable}
+        else:
+            # 잔여 현금으로 목표 비중 리밸런싱
+            log.info(f"📈 잔여 현금으로 목표 비중 리밸런싱:")
+            log.info(f"  - 투자 예산: {remaining_cash_after_deficit:,.0f}원")
+            
+            target_qty: Dict[str, int] = {}
+            
+            # 2-1) 1차 배분
+            for t in usable:
+                w = targets.get(t, 0.0)
+                target_value = remaining_cash_after_deficit * w
+                q = int(target_value // prices[t])
+                target_qty[t] = max(q, 0)
+            
+            # 2-2) 잔액으로 +1씩 증액 (가격 낮은 순)
+            spent = sum(target_qty[t] * prices[t] for t in usable)
+            leftover = max(remaining_cash_after_deficit - spent, 0.0)
+            if leftover > 0:
+                for t in sorted(usable, key=lambda x: prices[x]):
+                    if prices[t] <= leftover:
+                        target_qty[t] += 1
+                        leftover -= prices[t]
+            
+            log.info(f"📈 목표 수량 계산 완료:")
+            for t in usable:
+                log.info(f"  {t}: {target_qty[t]}주 → {target_qty[t] * prices[t] / remaining_cash_after_deficit * 100:.1f}% ({target_qty[t] * prices[t]:,.0f}원)")
+            
+            # 현재 보유와 목표 수량 비교
+            log.info(f"🔍 매도/매수 필요성 검토:")
+            for t in usable:
+                current_qty = positions.get(t, 0)
+                target_qty_val = target_qty.get(t, 0)
+                if target_qty_val > current_qty:
+                    log.info(f"  {t}: 현재 {current_qty}주 → 목표 {target_qty_val}주 (매수 {target_qty_val - current_qty}주 필요)")
+                elif target_qty_val < current_qty:
+                    log.info(f"  {t}: 현재 {current_qty}주 → 목표 {target_qty_val}주 (매도 {current_qty - target_qty_val}주 필요)")
+                else:
+                    log.info(f"  {t}: 현재 {current_qty}주 → 목표 {target_qty_val}주 (변화 없음)")
+    else:
+        # 정상 상황: 기존 로직
+        target_qty: Dict[str, int] = {}
+        budget = total_asset * (1 - reserve_ratio)
+        
+        # 2-1) 1차 배분
+        for t in usable:
+            w = targets.get(t, 0.0)
+            target_value = budget * w
+            q = int(target_value // prices[t])
+            target_qty[t] = max(q, 0)
+        
+        # 2-2) 잔액으로 +1씩 증액 (가격 낮은 순)
+        spent = sum(target_qty[t] * prices[t] for t in usable)
+        leftover = max(budget - spent, 0.0)
+        if leftover > 0:
+            for t in sorted(usable, key=lambda x: prices[x]):
+                if prices[t] <= leftover:
+                    target_qty[t] += 1
+                    leftover -= prices[t]
+        
+        log.info(f"📈 이상적 목표 수량 계산 완료:")
+        for t in usable:
+            log.info(f"  {t}: {target_qty[t]}주 → {target_qty[t] * prices[t] / total_asset * 100:.1f}% ({target_qty[t] * prices[t]:,.0f}원)")
+    
+    # 3. 순복합 델타 산출
+    deltas = {t: target_qty.get(t, 0) - positions.get(t, 0) for t in usable}
+    sells = [(t, abs(deltas[t])) for t, d in deltas.items() if d < 0]
+    buys = [(t, deltas[t]) for t, d in deltas.items() if d > 0]
+    
+    log.info(f"📋 순복합 델타 산출:")
+    log.info(f"  - 매도 필요: {len(sells)}개 종목")
+    log.info(f"  - 매수 필요: {len(buys)}개 종목")
+    
+    plan: List[OrderPlan] = []
+    current_cash = cash
+    
+    # 4. SELL 우선 실행 (미수 해결)
+    for t, qty in sorted(sells, key=lambda x: deltas[x[0]]):  # 과대비중 큰 것부터
+        price = prices[t]
+        if qty <= 0 or price <= 0:
+            continue
+            
+        # 최대 주문 금액 제한
+        if max_order_value_per_ticker:
+            qty = clamp_order_value(qty, price, max_order_value_per_ticker)
+        if qty <= 0:
+            continue
+            
+        plan.append(OrderPlan(code=t, side="SELL", qty=qty, limit=None))
+        current_cash += qty * price
+        log.info(f"  {t}: 매도 {qty}주")
+    
+    # 5. BUY 후행 실행 (가용 현금 내에서만)
+    for t, qty in sorted(buys, key=lambda x: -deltas[x[0]]):  # 가장 부족한 것부터
+        price = prices[t]
+        if qty <= 0 or price <= 0:
+            continue
+            
+        # 예산 내에서만 매수
+        affordable = int(current_cash // price)
+        if affordable <= 0:
+            log.warning(f"  {t}: 현금 부족으로 매수 불가 (필요: {qty}주, 가능: {affordable}주, 현재 현금: {current_cash:,.0f}원)")
+            continue
+            
+        buy_qty = min(qty, affordable)
+        
+        # 최대 주문 금액 제한
+        if max_order_value_per_ticker:
+            buy_qty = clamp_order_value(buy_qty, price, max_order_value_per_ticker)
+        if buy_qty <= 0:
+            continue
+            
+        plan.append(OrderPlan(code=t, side="BUY", qty=buy_qty, limit=None))
+        current_cash -= buy_qty * price
+        log.info(f"  {t}: 매수 {buy_qty}주")
+    
+    log.info(f"✅ 미수 해결 계획 완료: {len(plan)}건 (매도: {len(sells)}, 매수: {len(buys)})")
+    return plan
 
 
 async def _plan_deficit_resolution(positions: Dict[str, int], targets: Dict[str, float], 
@@ -222,9 +395,19 @@ async def _plan_deficit_resolution(positions: Dict[str, int], targets: Dict[str,
             log.warning(f"⚠️ 미체결 주문 취소 실패: {e}")
             log.info("미체결 주문 취소 없이 미수 해결 진행")
     
-    # 간단한 미수 해결 로직 (현재는 빈 리스트 반환)
-    log.info("미수 해결 로직 실행 (현재는 빈 계획 반환)")
-    return []
+    # 미수 해결을 위한 새로운 로직 사용
+    from src.config import Settings
+    settings = Settings()
+    
+    return plan_rebalance_with_deficit(
+        positions=positions,
+        targets=targets,
+        cash=d2_cash,  # 음수 D+2 예수금 전달
+        prices=prices,
+        band_pct=1.0,  # 미수 상황에서는 밴드 무시
+        max_order_value_per_ticker=max_order_value_per_ticker or settings.deficit_max_order_value,
+        reserve_ratio=settings.deficit_reserve_ratio
+    )
 
 
 def plan_rebalance_with_band(

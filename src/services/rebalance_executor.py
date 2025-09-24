@@ -21,6 +21,8 @@ async def build_plan(
     safety_margin_pct: float = 1.0,
     total_asset_value: float = None,
     broker=None,
+    is_mock: bool = True,
+    orderable_cash: float = None,
 ) -> List[OrderPlan]:
     # 1. 깔끔한 리밸런싱 계획 수립 (모든 미체결 주문 취소 후)
     plan = await plan_rebalance(
@@ -34,6 +36,8 @@ async def build_plan(
         safety_margin_pct=safety_margin_pct,
         total_asset_value=total_asset_value,
         broker=broker,
+        is_mock=is_mock,
+        orderable_cash=orderable_cash,
     )
     
     # 2. 현금 부족 방지 검증 및 조정 (미수 해결 모드에서는 우회)
