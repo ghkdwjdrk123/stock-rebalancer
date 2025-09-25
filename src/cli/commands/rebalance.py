@@ -9,6 +9,7 @@ from src.services.report import format_plan
 
 from src.adapters.kis.client import KISClient
 from src.adapters.kis.domestic import KISDomestic
+from src.adapters.kis.api_config import is_pension_account
 from src.services.brokers.kis import KISBroker
 from src.services.portfolio import get_positions_and_cash, get_positions_with_daily_orders, get_prices
 from src.services.rebalance_executor import build_plan, execute_plan
@@ -76,6 +77,25 @@ def find_targets_config(env: str = "dev", broker: str = "kis") -> str:
 async def _run(config: str, dry_run: bool, env: str = "dev", ignore_guards: bool = False, raw: bool = False, order_delay: float = 1.0, safety_mode: str = "conservative", strict_cancellation: bool = True, persistent_retry: bool = True, retry_threshold: float = 0.8):
     st = Settings()
     targets = load_targets(config)
+    
+    # 연금계좌 제한 체크 (dry_run이 아닌 경우에만)
+    if not dry_run and "account_info" in targets:
+        account_info = targets["account_info"]
+        account_pd = account_info.get("account_pd")
+        
+        if is_pension_account(account_pd):
+            from src.adapters.kis.api_config import api_config_manager
+            account_type_name = api_config_manager.get_account_type_name(account_pd)
+            
+            log.error(f"❌ {account_type_name}에서는 리밸런싱(주문) 기능이 지원되지 않습니다.")
+            log.error(f"❌ 연금계좌는 조회 기능만 사용 가능합니다. (balance, pending 명령어)")
+            log.error(f"❌ 자동매매나 리밸런싱을 위해서는 일반 위탁계좌를 사용해주세요.")
+            
+            typer.echo(f"❌ {account_type_name}에서는 리밸런싱(주문) 기능이 지원되지 않습니다.")
+            typer.echo(f"❌ 연금계좌는 조회 기능만 사용 가능합니다. (balance, pending 명령어)")
+            typer.echo(f"❌ 자동매매나 리밸런싱을 위해서는 일반 위탁계좌를 사용해주세요.")
+            
+            raise typer.Exit(1)
     
     # 디버깅: raw 값 확인
     if raw:

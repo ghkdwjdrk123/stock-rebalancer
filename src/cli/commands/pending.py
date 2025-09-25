@@ -9,6 +9,7 @@ from src.adapters.kis.client import KISClient
 from src.adapters.kis.domestic import KISDomestic
 from src.services.brokers.kis import KISBroker
 from src.services.daily_orders import parse_daily_orders, get_pending_orders, get_order_summary
+from src.adapters.kis.api_config import is_pension_account, api_config_manager
 
 
 log = get_logger("cli.pending")
@@ -24,6 +25,21 @@ async def _run(raw: bool = False, env: str = "dev"):
     if missing:
         log.error(f"[설정 오류] 다음 설정이 비어 있습니다: {', '.join(missing)}. .env의 {env} 환경 값을 채워주세요.")
         return
+    
+    # 연금계좌 제한 체크
+    account_pd = conf.get("account_pd")
+    if is_pension_account(account_pd):
+        account_type_name = api_config_manager.get_account_type_name(account_pd)
+        
+        log.error(f"❌ {account_type_name}에서는 미체결 주문 조회 기능이 지원되지 않습니다.")
+        log.error(f"❌ 연금계좌는 주문 기능이 제한되어 있어 미체결 주문이 발생하지 않습니다.")
+        log.error(f"❌ 잔고 조회는 balance 명령어를 사용해주세요.")
+        
+        typer.echo(f"❌ {account_type_name}에서는 미체결 주문 조회 기능이 지원되지 않습니다.")
+        typer.echo(f"❌ 연금계좌는 주문 기능이 제한되어 있어 미체결 주문이 발생하지 않습니다.")
+        typer.echo(f"❌ 잔고 조회는 balance 명령어를 사용해주세요.")
+        
+        raise typer.Exit(1)
     
     client = KISClient(conf["base"], conf["app_key"], conf["app_secret"])
     dom = KISDomestic(client, conf["account_8"], conf["account_pd"], env=env)

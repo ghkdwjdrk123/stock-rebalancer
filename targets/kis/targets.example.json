@@ -1,0 +1,19 @@
+{
+  "account_info": {
+    "broker": "kis",
+    "env": "dev",
+    "account_8": "XXXXXXXX",
+    "account_pd": "계좌 상품 코드 (2자리)",
+    "description": "KIS 모의투자 계좌 (개발용)"
+  },
+  "rebalance_config": {
+    "band_pct": 1.0,
+    "order_style": "market",
+    "safety_margin_pct": 1.0
+  },
+  "tickers": {
+    "379810": 0.60,
+    "458730": 0.30,
+    "329750": 0.10
+  }
+}

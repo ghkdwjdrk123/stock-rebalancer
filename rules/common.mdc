@@ -36,20 +36,33 @@ price = settings.default_price
 #### 2. API 경로 및 TR_ID 관리
 - **완전한 .env 기반**: 모든 API 경로와 TR_ID는 `.env`에서 관리
 - **환경별 분리**: `_DEV`/`_PROD` 접미사로 환경별 설정 분리
-- **자동 환경 감지**: `_tr()` 메서드가 환경에 따라 자동으로 적절한 TR_ID 선택
+- **계좌 유형별 분기**: 일반계좌/연금계좌에 따른 API 경로 자동 선택
+- **자동 환경 감지**: `_get_tr_id()` 메서드가 환경에 따라 자동으로 적절한 TR_ID 선택
 
 ```python
 # src/adapters/kis/domestic.py
-PATH_BALANCE = os.getenv("KIS_PATH_BALANCE", "/uapi/domestic-stock/v1/trading/inquire-balance")
+def _get_tr_id(self, api_type: str) -> str:
+    """계좌 상품코드와 환경에 따른 TR_ID 반환"""
+    return get_tr_id(self.pd, api_type, self.env)
 
-def _tr(self, key: str) -> str:
-    if self.env in ("prod", "production", "real", "live"):
-        tr_id = os.getenv(f"KIS_TR_{key}_PROD") or os.getenv(f"KIS_TR_{key}")
-    else:
-        tr_id = os.getenv(f"KIS_TR_{key}_DEV") or os.getenv(f"KIS_TR_{key}")
+def _get_api_path(self, api_type: str) -> str:
+    """계좌 상품코드에 따른 API 경로 반환"""
+    return get_api_path(self.pd, api_type)
+
+# src/adapters/kis/api_config.py
+def get_tr_id(account_product_code: str, api_type: str, env: str) -> str:
+    """계좌 상품코드, API 타입, 환경에 따른 TR_ID 반환"""
+    env_suffix = "PROD" if env in ("prod", "production", "real", "live") else "DEV"
     
+    # 계좌 유형별 TR_ID 키 생성
+    if account_product_code == "22":  # 연금계좌
+        tr_id_key = f"KIS_TR_PENSION_{api_type.upper()}_{env_suffix}"
+    else:  # 일반계좌
+        tr_id_key = f"KIS_TR_{api_type.upper()}_{env_suffix}"
+    
+    tr_id = os.getenv(tr_id_key)
     if not tr_id:
-        raise ValueError(f"TR_ID not found: KIS_TR_{key}_DEV/PROD or KIS_TR_{key} must be set in .env")
+        raise ValueError(f"TR_ID not found: {tr_id_key} must be set in .env")
     return tr_id
 ```
 
@@ -140,43 +153,45 @@ KIS_ACCOUNT_PD=01
 
 - 선택 항목(미입력 시 기본값 사용)
 ```ini
-# === API 경로 설정 ===
-KIS_PATH_BALANCE=/uapi/domestic-stock/v1/trading/inquire-balance
-KIS_PATH_ORDER_CASH=/uapi/domestic-stock/v1/trading/order-cash
-KIS_PATH_PRICE=/uapi/domestic-stock/v1/quotations/inquire-price
-KIS_PATH_ORDERABLE_CASH=/uapi/domestic-stock/v1/trading/inquire-psbl-order
-KIS_PATH_MARKETSTATUS=/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice
-KIS_PATH_DAILY_ORDERS=/uapi/domestic-stock/v1/trading/inquire-daily-ccld
+# === API URL 설정 ===
+# 일반 위탁계좌 (01) API 경로
+KIS_PATH_BALANCE_REGULAR=/uapi/domestic-stock/v1/trading/inquire-balance
+KIS_PATH_DAILY_ORDERS_REGULAR=/uapi/domestic-stock/v1/trading/inquire-daily-ccld
+KIS_PATH_ORDERABLE_CASH_REGULAR=/uapi/domestic-stock/v1/trading/inquire-psbl-order
+KIS_PATH_ORDER_CASH_REGULAR=/uapi/domestic-stock/v1/trading/order-cash
+KIS_PATH_CANCEL_ORDER_REGULAR=/uapi/domestic-stock/v1/trading/order-rvsecncl
 
-# === TR_ID 설정 (환경별) ===
-# 모의투자 TR_ID
+# 연금계좌 (22)는 일반계좌 API 사용
+# KIS_PATH_BALANCE_PENSION=/uapi/domestic-stock/v1/trading/pension/inquire-balance
+# KIS_PATH_DAILY_ORDERS_PENSION=/uapi/domestic-stock/v1/trading/pension/inquire-daily-ccld
+
+# 가격 조회 (계좌 유형 무관)
+KIS_PATH_PRICE=/uapi/domestic-stock/v1/quotations/inquire-price
+
+# === TR_ID 설정 ===
+# 일반 위탁계좌 (01) - 개발환경
 KIS_TR_BALANCE_DEV=VTTC8434R
+KIS_TR_DAILY_ORDERS_DEV=VTTC8001R
+KIS_TR_ORDERABLE_CASH_DEV=VTTC8407R
 KIS_TR_ORDER_BUY_DEV=VTTC0802U
 KIS_TR_ORDER_SELL_DEV=VTTC0801U
-KIS_TR_ORDER_CANCEL_DEV=VTTC8033U
-KIS_TR_PRICE_DEV=FHKST01010100
-KIS_TR_ORDERABLE_CASH_DEV=VTTC8908R
-KIS_TR_MARKETSTATUS_DEV=CTPF1002R
-KIS_TR_DAILY_ORDERS_DEV=VTTC8001R
+KIS_TR_ORDER_CANCEL_DEV=VTTC0803U
+KIS_TR_PRICE_DEV=JTPT1002R
 
-# 실전 TR_ID
+# 일반 위탁계좌 (01) - 운영환경
 KIS_TR_BALANCE_PROD=TTTC8434R
+KIS_TR_DAILY_ORDERS_PROD=TTTC8001R
+KIS_TR_ORDERABLE_CASH_PROD=TTTC8407R
 KIS_TR_ORDER_BUY_PROD=TTTC0802U
 KIS_TR_ORDER_SELL_PROD=TTTC0801U
-KIS_TR_ORDER_CANCEL_PROD=TTTC8033U
-KIS_TR_PRICE_PROD=FHKST01010100
-KIS_TR_ORDERABLE_CASH_PROD=TTTC8908R
-KIS_TR_MARKETSTATUS_PROD=CTPF1002R
-KIS_TR_DAILY_ORDERS_PROD=TTTC8001R
+KIS_TR_ORDER_CANCEL_PROD=TTTC0803U
+KIS_TR_PRICE_PROD=JTPT1002R
 
-# 레거시 TR_ID (환경 구분 없음)
-KIS_TR_BALANCE=VTTC8434R
-KIS_TR_ORDER_BUY=VTTC0802U
-KIS_TR_ORDER_SELL=VTTC0801U
-KIS_TR_PRICE=FHKST01010100
-KIS_TR_ORDERABLE_CASH=VTTC8908R
-KIS_TR_MARKETSTATUS=CTPF1002R
-KIS_TR_DAILY_ORDERS=VTTC8001R
+# 연금계좌 (22)는 일반계좌 TR_ID 사용
+# KIS_TR_PENSION_BALANCE_DEV=VTTC2208R
+# KIS_TR_PENSION_DAILY_ORDERS_DEV=VTTC2201R
+# KIS_TR_PENSION_BALANCE_PROD=TTTC2208R
+# KIS_TR_PENSION_DAILY_ORDERS_PROD=TTTC2201R
 
 # === 토큰 및 캐시 설정 ===
 KIS_TOKEN_REFRESH_LEEWAY_SEC=600
